@@ -42,6 +42,7 @@ sub Run {
 
         # StartHit => $StartHit,
     );
+    # create output
     my $Output = $LayoutObject->Header();
     $Output .= $LayoutObject->NavigationBar();
     $Output .= $LayoutObject->Output(
@@ -103,44 +104,37 @@ sub _Overview {
 
     # initiate ticket object
     my $TicketObject = $Kernel::OM->Get('Kernel::System::Ticket');
-
+    # create date time object
     my $DateTimeObject = $Kernel::OM->Create(
         'Kernel::System::DateTime'
     );
-
+    # substract 7 days from current date time object
     my $Success = $DateTimeObject->Subtract(
         Days => 7,
     );
-
+    # create date string for ticket search
     my $DateTimeString = $DateTimeObject->ToString();
-
+    # reset for ticket search as CloseTime is not default sort value
     if ( $SortBy eq "CloseTime" ) {
         $SortBy = "";
     }
 
     # perform ticket search
     my @TicketIDs = $TicketObject->TicketSearch(
-
         # result (required)
         Result => 'ARRAY',
-
         # result limit
         Limit => 10_000,
-
         # (Open|Closed) tickets for all closed or open tickets.
         StateType => 'Closed',
-
         # tickets with closed time after ... (ticket closed newer than this date) (optional)
         TicketCloseTimeNewerDate => $DateTimeString,
-
         # OrderBy and SortBy (optional)
         OrderBy => $OrderBy || 'Down',
         SortBy  => $SortBy  || 'Age',
-
         # user search (UserID is required)
         UserID     => $UserID,
         Permission => 'rw',
-
         # CacheTTL, cache search result in seconds (optional)
         CacheTTL => 60 * 15,
     );
@@ -158,25 +152,24 @@ sub _Overview {
     if (@TicketIDs) {
         if ( $Param{SortBy} eq "CloseTime" ) {
             my @Tickets;
-
             # loop through found tickets
             for my $TicketID (@TicketIDs) {
-
                 # get ticket info
                 my %Ticket = $TicketObject->TicketGet(
                     TicketID => $TicketID,
                     UserID   => $UserID,
                 );
-
+                # get closed ticket info
                 my %TicketGetClosed = $TicketObject->_TicketGetClosed(
                     TicketID => $TicketID,
                     Ticket   => \%Ticket,
                 );
-
+                # set close time
                 $Ticket{CloseTime} = $TicketGetClosed{Closed};
                 push @Tickets, \%Ticket;
             }
 
+            # sort tickets accordingly to set order
             if ( $OrderBy eq "Up" ) {
                 @Tickets = sort { $a->{CloseTime} cmp $b->{CloseTime} } @Tickets;
             }
@@ -185,6 +178,7 @@ sub _Overview {
             }
 
             for my $Ticket (@Tickets) {
+                # get owner data
                 my %User = $UserObject->GetUserData(
                     UserID => $Ticket->{OwnerID},
                 );
@@ -198,27 +192,24 @@ sub _Overview {
                     },
                 );
             }
-
         }
         else {
             # loop through found tickets
             for my $TicketID (@TicketIDs) {
-
                 # get ticket info
                 my %Ticket = $TicketObject->TicketGet(
                     TicketID => $TicketID,
                     UserID   => $UserID,
                 );
-
+                # get owner data
                 my %User = $UserObject->GetUserData(
                     UserID => $Ticket{OwnerID},
                 );
-
+                # get closed ticket info
                 my %TicketGetClosed = $TicketObject->_TicketGetClosed(
                     TicketID => $TicketID,
                     Ticket   => \%Ticket,
                 );
-
                 # render overview result row block
                 $LayoutObject->Block(
                     Name => 'OverviewResultRow',
