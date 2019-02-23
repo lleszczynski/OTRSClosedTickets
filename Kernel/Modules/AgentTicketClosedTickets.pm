@@ -30,207 +30,403 @@ sub Run {
     my ( $Self, %Param ) = @_;
 
     # get needed objects
-    my $LayoutObject = $Kernel::OM->Get('Kernel::Output::HTML::Layout');
     my $ParamObject  = $Kernel::OM->Get('Kernel::System::Web::Request');
+    my $ConfigObject = $Kernel::OM->Get('Kernel::Config');
 
-    my $OrderBy = $ParamObject->GetParam( Param => 'OrderBy' ) || '';
-    my $SortBy  = $ParamObject->GetParam( Param => 'SortBy' )  || '';
+    # get config
+    my $Config = $ConfigObject->Get("Ticket::Frontend::$Self->{Action}");
 
-    $Self->_Overview(
-        OrderBy => $OrderBy,
-        SortBy  => $SortBy,
+    my $SortBy = $ParamObject->GetParam( Param => 'SortBy' )
+        || $Config->{'SortBy::Default'}
+        || 'Age';
+    my $OrderBy = $ParamObject->GetParam( Param => 'OrderBy' )
+        || $Config->{'Order::Default'}
+        || 'Up';
 
-        # StartHit => $StartHit,
-    );
-    # create output
-    my $Output = $LayoutObject->Header();
-    $Output .= $LayoutObject->NavigationBar();
-    $Output .= $LayoutObject->Output(
-        TemplateFile => 'AgentTicketClosedTickets',
-        Data         => \%Param,
-    );
-    $Output .= $LayoutObject->Footer();
-    return $Output;
-}
-
-sub _Overview {
-    my ( $Self, %Param ) = @_;
-
-    # initiate layout object
-    my $LayoutObject = $Kernel::OM->Get('Kernel::Output::HTML::Layout');
-
-    # render overview block
-    $LayoutObject->Block(
-        Name => 'Overview',
-        Data => \%Param,
+    # store last queue screen
+    $Kernel::OM->Get('Kernel::System::AuthSession')->UpdateSessionID(
+        SessionID => $Self->{SessionID},
+        Key       => 'LastScreenOverview',
+        Value     => $Self->{RequestedURL},
     );
 
-    my $OrderBy = $Param{OrderBy} || 'Down';
-    my $SortBy  = $Param{SortBy}  || 'Queue';
+    # get user object
+    my $UserObject = $Kernel::OM->Get('Kernel::System::User');
 
-    my @Columns = ( 'Queue', 'TicketNumber', 'Title', 'Owner', 'CloseTime' );
+    # get filters stored in the user preferences
+    my %Preferences = $UserObject->GetPreferences(
+        UserID => $Self->{UserID},
+    );
 
-    for my $Column (@Columns) {
+    my $StoredFiltersKey = 'UserStoredFilterColumns-' . $Self->{Action};
+    my $JSONObject       = $Kernel::OM->Get('Kernel::System::JSON');
+    my $StoredFilters    = $JSONObject->Decode(
+        Data => $Preferences{$StoredFiltersKey},
+    );
 
-        if ( $SortBy && ( $SortBy eq $Column ) ) {
-            my $TitleDesc;
+    # delete stored filters if needed
+    if ( $ParamObject->GetParam( Param => 'DeleteFilters' ) ) {
+        $StoredFilters = {};
+    }
 
-            # Change order for sorting column.
-            $Param{ $Column . "OrderBy" } = $OrderBy eq 'Up' ? 'Down' : 'Up';
+    # get the column filters from the web request or user preferences
+    my %ColumnFilter;
+    my %GetColumnFilter;
+    COLUMNNAME:
+    for my $ColumnName (
+        qw(Owner Responsible State Queue Priority Type Lock Service SLA CustomerID CustomerUserID)
+        )
+    {
+        # get column filter from web request
+        my $FilterValue = $ParamObject->GetParam( Param => 'ColumnFilter' . $ColumnName )
+            || '';
 
-            if ( $OrderBy eq 'Down' ) {
-                $Param{ $Column . "CSS" } .= 'OverviewHeader ' . $Column . ' SortAscendingLarge';
-                $Param{ $Column . "Title" } = Translatable('sorted ascending');
+        # if filter is not present in the web request, try with the user preferences
+        if ( $FilterValue eq '' ) {
+            if ( $ColumnName eq 'CustomerID' ) {
+                $FilterValue = $StoredFilters->{$ColumnName}->[0] || '';
+            }
+            elsif ( $ColumnName eq 'CustomerUserID' ) {
+                $FilterValue = $StoredFilters->{CustomerUserLogin}->[0] || '';
             }
             else {
-                $Param{ $Column . "CSS" } .= 'OverviewHeader ' . $Column . ' SortDescendingLarge';
-                $Param{ $Column . "Title" } = Translatable('sorted descending');
+                $FilterValue = $StoredFilters->{ $ColumnName . 'IDs' }->[0] || '';
             }
+        }
+        next COLUMNNAME if $FilterValue eq '';
+        next COLUMNNAME if $FilterValue eq 'DeleteFilter';
+
+        if ( $ColumnName eq 'CustomerID' ) {
+            push @{ $ColumnFilter{$ColumnName} }, $FilterValue;
+            push @{ $ColumnFilter{ $ColumnName . 'Raw' } }, $FilterValue;
+            $GetColumnFilter{$ColumnName} = $FilterValue;
+        }
+        elsif ( $ColumnName eq 'CustomerUserID' ) {
+            push @{ $ColumnFilter{CustomerUserLogin} },    $FilterValue;
+            push @{ $ColumnFilter{CustomerUserLoginRaw} }, $FilterValue;
+            $GetColumnFilter{$ColumnName} = $FilterValue;
+        }
+        else {
+            push @{ $ColumnFilter{ $ColumnName . 'IDs' } }, $FilterValue;
+            $GetColumnFilter{$ColumnName} = $FilterValue;
         }
     }
 
-    # initiate group object
-    my $GroupObject = $Kernel::OM->Get('Kernel::System::Group');
-
-    # check user permissions
-    my $HasPermission = $GroupObject->PermissionCheck(
-        UserID    => $Self->{UserID},
-        GroupName => 'admin',
-        Type      => 'rw',
+    # get all dynamic fields
+    $Self->{DynamicField} = $Kernel::OM->Get('Kernel::System::DynamicField')->DynamicFieldListGet(
+        Valid      => 1,
+        ObjectType => ['Ticket'],
     );
 
-    # assign root account id if has permissions for 'admin' group
-    my $UserID = $HasPermission ? 1 : $Self->{UserID};
+    DYNAMICFIELD:
+    for my $DynamicFieldConfig ( @{ $Self->{DynamicField} } ) {
+        next DYNAMICFIELD if !IsHashRefWithData($DynamicFieldConfig);
+        next DYNAMICFIELD if !$DynamicFieldConfig->{Name};
 
-    # initiate ticket object
-    my $TicketObject = $Kernel::OM->Get('Kernel::System::Ticket');
-    # create date time object
+        # get filter from web request
+        my $FilterValue = $ParamObject->GetParam(
+            Param => 'ColumnFilterDynamicField_' . $DynamicFieldConfig->{Name}
+        );
+
+        # if no filter from web request, try from user preferences
+        if ( !defined $FilterValue || $FilterValue eq '' ) {
+            $FilterValue = $StoredFilters->{ 'DynamicField_' . $DynamicFieldConfig->{Name} }->{Equals};
+        }
+
+        next DYNAMICFIELD if !defined $FilterValue;
+        next DYNAMICFIELD if $FilterValue eq '';
+        next DYNAMICFIELD if $FilterValue eq 'DeleteFilter';
+
+        $ColumnFilter{ 'DynamicField_' . $DynamicFieldConfig->{Name} } = {
+            Equals => $FilterValue,
+        };
+        $GetColumnFilter{ 'DynamicField_' . $DynamicFieldConfig->{Name} } = $FilterValue;
+    }
+
+    # starting with page ...
+    my $Refresh = '';
+    if ( $Self->{UserRefreshTime} ) {
+        $Refresh = 60 * $Self->{UserRefreshTime};
+    }
+    my $Output;
+
+    # get layout object
+    my $LayoutObject = $Kernel::OM->Get('Kernel::Output::HTML::Layout');
+
+    if ( $Self->{Subaction} ne 'AJAXFilterUpdate' ) {
+        $Output = $LayoutObject->Header(
+            Refresh => $Refresh,
+        );
+        $Output .= $LayoutObject->NavigationBar();
+    }
+
     my $DateTimeObject = $Kernel::OM->Create(
         'Kernel::System::DateTime'
     );
+    # substract 1 days from current date time object
+    my $Success = $DateTimeObject->Subtract(
+        Days => 1,
+    );
+    my $Last24HoursDateTimeString = $DateTimeObject->ToString();
     # substract 7 days from current date time object
     my $Success = $DateTimeObject->Subtract(
-        Days => 7,
+        Days => 6,
     );
-    # create date string for ticket search
-    my $DateTimeString = $DateTimeObject->ToString();
-    # reset for ticket search as CloseTime is not default sort value
-    if ( $SortBy eq "CloseTime" ) {
-        $SortBy = "";
-    }
+    my $Last7DaysDateTimeString = $DateTimeObject->ToString();
+    # substract 30 days from current date time object
+    my $Success = $DateTimeObject->Subtract(
+        Days => 23,
+    );
+    my $Last30DaysDateTimeString = $DateTimeObject->ToString();
 
-    # perform ticket search
-    my @TicketIDs = $TicketObject->TicketSearch(
-        # result (required)
-        Result => 'ARRAY',
-        # result limit
-        Limit => 10_000,
-        # (Open|Closed) tickets for all closed or open tickets.
-        StateType => 'Closed',
-        # tickets with closed time after ... (ticket closed newer than this date) (optional)
-        TicketCloseTimeNewerDate => $DateTimeString,
-        # OrderBy and SortBy (optional)
-        OrderBy => $OrderBy || 'Down',
-        SortBy  => $SortBy  || 'Age',
-        # user search (UserID is required)
-        UserID     => $UserID,
-        Permission => 'rw',
-        # CacheTTL, cache search result in seconds (optional)
-        CacheTTL => 60 * 15,
+
+    # define filter
+    my %Filters = (
+        Closed => {
+            Name   => Translatable('Closed tickets'),
+            Prio   => 1001,
+            Search => {
+                StateType  => 'Closed',
+                OrderBy    => $OrderBy,
+                SortBy     => $SortBy,
+                UserID     => $Self->{UserID},
+                Permission => 'ro',
+            },
+        },
+        ClosedInLast24Hours => {
+            Name   => Translatable('Last 24 hours'),
+            Prio   => 1002,
+            Search => {
+                StateType  => 'Closed',
+        		TicketCloseTimeNewerDate => $Last24HoursDateTimeString,
+                OrderBy    => $OrderBy,
+                SortBy     => $SortBy,
+                UserID     => $Self->{UserID},
+                Permission => 'ro',
+            },
+        },
+        ClosedInLastWeek => {
+            Name   => Translatable('Last 7 days'),
+            Prio   => 1003,
+            Search => {
+                StateType  => 'Closed',
+        		TicketCloseTimeNewerDate => $Last7DaysDateTimeString,
+                OrderBy    => $OrderBy,
+                SortBy     => $SortBy,
+                UserID     => $Self->{UserID},
+                Permission => 'ro',
+            },
+        },
+        ClosedInLastMonth => {
+            Name   => Translatable('Last 30 days'),
+            Prio   => 1004,
+            Search => {
+                StateType  => 'Closed',
+        		TicketCloseTimeNewerDate => $Last30DaysDateTimeString,
+                OrderBy    => $OrderBy,
+                SortBy     => $SortBy,
+                UserID     => $Self->{UserID},
+                Permission => 'ro',
+            },
+        },
     );
 
-    # render overview result block
-    $LayoutObject->Block(
-        Name => 'OverviewResult',
-        Data => \%Param,
-    );
+    my $Filter = $ParamObject->GetParam( Param => 'Filter' ) || 'Closed';
 
-    # initiate user object
-    my $UserObject = $Kernel::OM->Get('Kernel::System::User');
-
-    # if there are any tickets found, they are shown
-    if (@TicketIDs) {
-        if ( $Param{SortBy} eq "CloseTime" ) {
-            my @Tickets;
-            # loop through found tickets
-            for my $TicketID (@TicketIDs) {
-                # get ticket info
-                my %Ticket = $TicketObject->TicketGet(
-                    TicketID => $TicketID,
-                    UserID   => $UserID,
-                );
-                # get closed ticket info
-                my %TicketGetClosed = $TicketObject->_TicketGetClosed(
-                    TicketID => $TicketID,
-                    Ticket   => \%Ticket,
-                );
-                # set close time
-                $Ticket{CloseTime} = $TicketGetClosed{Closed};
-                push @Tickets, \%Ticket;
-            }
-
-            # sort tickets accordingly to set order
-            if ( $OrderBy eq "Up" ) {
-                @Tickets = sort { $a->{CloseTime} cmp $b->{CloseTime} } @Tickets;
-            }
-            else {
-                @Tickets = sort { $b->{CloseTime} cmp $a->{CloseTime} } @Tickets;
-            }
-
-            for my $Ticket (@Tickets) {
-                # get owner data
-                my %User = $UserObject->GetUserData(
-                    UserID => $Ticket->{OwnerID},
-                );
-
-                # render overview result row block
-                $LayoutObject->Block(
-                    Name => 'OverviewResultRow',
-                    Data => {
-                        %{$Ticket},
-                        OwnerFullName => $User{UserFullname},
-                    },
-                );
-            }
-        }
-        else {
-            # loop through found tickets
-            for my $TicketID (@TicketIDs) {
-                # get ticket info
-                my %Ticket = $TicketObject->TicketGet(
-                    TicketID => $TicketID,
-                    UserID   => $UserID,
-                );
-                # get owner data
-                my %User = $UserObject->GetUserData(
-                    UserID => $Ticket{OwnerID},
-                );
-                # get closed ticket info
-                my %TicketGetClosed = $TicketObject->_TicketGetClosed(
-                    TicketID => $TicketID,
-                    Ticket   => \%Ticket,
-                );
-                # render overview result row block
-                $LayoutObject->Block(
-                    Name => 'OverviewResultRow',
-                    Data => {
-                        %Ticket,
-                        OwnerFullName => $User{UserFullname},
-                        CloseTime     => $TicketGetClosed{Closed},
-                    },
-                );
-            }
-        }
-    }
-
-    # otherwise a no data found msg is displayed
-    else {
-        $LayoutObject->Block(
-            Name => 'NoDataFoundMsg',
-            Data => {},
+    # check if filter is valid
+    if ( !$Filters{$Filter} ) {
+        $LayoutObject->FatalError(
+            Message => $LayoutObject->{LanguageObject}->Translate( 'Invalid Filter: %s!', $Filter ),
         );
     }
-    return 1;
+
+    # do shown tickets lookup
+    my $Limit = 10_000;
+
+    my $ElementChanged = $ParamObject->GetParam( Param => 'ElementChanged' ) || '';
+    my $HeaderColumn   = $ElementChanged;
+    $HeaderColumn =~ s{\A ColumnFilter }{}msxg;
+    my @OriginalViewableTickets;
+    my @ViewableTickets;
+    my $ViewableTicketCount = 0;
+
+    # get ticket object
+    my $TicketObject = $Kernel::OM->Get('Kernel::System::Ticket');
+
+    # get ticket values
+    if (
+        !IsStringWithData($HeaderColumn)
+        || (
+            IsStringWithData($HeaderColumn)
+            && (
+                $ConfigObject->Get('OnlyValuesOnTicket') ||
+                $HeaderColumn eq 'CustomerID' ||
+                $HeaderColumn eq 'CustomerUserID'
+            )
+        )
+        )
+    {
+        @OriginalViewableTickets = $TicketObject->TicketSearch(
+            %{ $Filters{$Filter}->{Search} },
+            Limit  => $Limit,
+            Result => 'ARRAY',
+        );
+
+        @ViewableTickets = $TicketObject->TicketSearch(
+            %{ $Filters{$Filter}->{Search} },
+            %ColumnFilter,
+            Limit  => $Limit,
+            Result => 'ARRAY',
+        );
+
+        $ViewableTicketCount = $TicketObject->TicketSearch(
+            %{ $Filters{$Filter}->{Search} },
+            %ColumnFilter,
+            Result => 'COUNT',
+        ) || 0;
+    }
+
+    my $View = $ParamObject->GetParam( Param => 'View' ) || '';
+
+    if ( $Self->{Subaction} eq 'AJAXFilterUpdate' ) {
+
+        my $FilterContent = $LayoutObject->TicketListShow(
+            FilterContentOnly   => 1,
+            HeaderColumn        => $HeaderColumn,
+            ElementChanged      => $ElementChanged,
+            OriginalTicketIDs   => \@OriginalViewableTickets,
+            Action              => 'AgentTicketClosedTickets',
+            Env                 => $Self,
+            View                => $View,
+            EnableColumnFilters => 1,
+        );
+
+        if ( !$FilterContent ) {
+            $LayoutObject->FatalError(
+                Message => $LayoutObject->{LanguageObject}
+                    ->Translate( 'Can\'t get filter content data of %s!', $HeaderColumn ),
+            );
+        }
+
+        return $LayoutObject->Attachment(
+            ContentType => 'application/json; charset=' . $LayoutObject->{Charset},
+            Content     => $FilterContent,
+            Type        => 'inline',
+            NoCache     => 1,
+        );
+    }
+    else {
+
+        # store column filters
+        my $StoredFilters = \%ColumnFilter;
+
+        my $StoredFiltersKey = 'UserStoredFilterColumns-' . $Self->{Action};
+        $UserObject->SetPreferences(
+            UserID => $Self->{UserID},
+            Key    => $StoredFiltersKey,
+            Value  => $JSONObject->Encode( Data => $StoredFilters ),
+        );
+    }
+
+    if ( $ViewableTicketCount > $Limit ) {
+        $ViewableTicketCount = $Limit;
+    }
+
+    # do nav bar lookup
+    my %NavBarFilter;
+    for my $Filter ( sort keys %Filters ) {
+        my $Count = $TicketObject->TicketSearch(
+            %{ $Filters{$Filter}->{Search} },
+            %ColumnFilter,
+            Result => 'COUNT',
+        ) || 0;
+        if ( $Count > $Limit ) {
+            $Count = $Limit;
+        }
+
+        $NavBarFilter{ $Filters{$Filter}->{Prio} } = {
+            Count  => $Count,
+            Filter => $Filter,
+            %{ $Filters{$Filter} },
+        };
+    }
+
+    my $ColumnFilterLink = '';
+    COLUMNNAME:
+    for my $ColumnName ( sort keys %GetColumnFilter ) {
+        next COLUMNNAME if !$ColumnName;
+        next COLUMNNAME if !$GetColumnFilter{$ColumnName};
+        $ColumnFilterLink
+            .= ';' . $LayoutObject->Ascii2Html( Text => 'ColumnFilter' . $ColumnName )
+            . '=' . $LayoutObject->Ascii2Html( Text => $GetColumnFilter{$ColumnName} );
+    }
+
+    # show ticket's
+    my $LinkPage = 'Filter='
+        . $LayoutObject->Ascii2Html( Text => $Filter )
+        . ';View=' . $LayoutObject->Ascii2Html( Text => $View )
+        . ';SortBy=' . $LayoutObject->Ascii2Html( Text => $SortBy )
+        . ';OrderBy=' . $LayoutObject->Ascii2Html( Text => $OrderBy )
+        . $ColumnFilterLink
+        . ';';
+
+    my $LinkSort = 'Filter='
+        . $LayoutObject->Ascii2Html( Text => $Filter )
+        . ';View=' . $LayoutObject->Ascii2Html( Text => $View )
+        . $ColumnFilterLink
+
+        . ';';
+    my $FilterLink = 'SortBy=' . $LayoutObject->Ascii2Html( Text => $SortBy )
+        . ';OrderBy=' . $LayoutObject->Ascii2Html( Text => $OrderBy )
+        . ';View=' . $LayoutObject->Ascii2Html( Text => $View )
+        . ';';
+
+    my $LastColumnFilter = $ParamObject->GetParam( Param => 'LastColumnFilter' ) || '';
+
+    if ( !$LastColumnFilter && $ColumnFilterLink ) {
+
+        # is planned to have a link to go back here
+        $LastColumnFilter = 1;
+    }
+
+    $Output .= $LayoutObject->TicketListShow(
+        TicketIDs         => \@ViewableTickets,
+        OriginalTicketIDs => \@OriginalViewableTickets,
+        GetColumnFilter   => \%GetColumnFilter,
+        LastColumnFilter  => $LastColumnFilter,
+        Action            => 'AgentTicketClosedTickets',
+        RequestedURL      => $Self->{RequestedURL},
+
+        Total      => $ViewableTicketCount,
+        Env        => $Self,
+        LinkPage   => $LinkPage,
+        LinkSort   => $LinkSort,
+        View       => $View,
+        Bulk       => 1,
+        Limit      => $Limit,
+        TitleName  => Translatable('Closed tickets view'),
+        TitleValue => $Filters{$Filter}->{Name},
+
+        Filter     => $Filter,
+        Filters    => \%NavBarFilter,
+        LinkFilter => $FilterLink,
+
+        OrderBy             => $OrderBy,
+        SortBy              => $SortBy,
+        EnableColumnFilters => 1,
+        ColumnFilterForm    => {
+            Filter => $Filter || '',
+        },
+
+        # do not print the result earlier, but return complete content
+        Output => 1,
+    );
+
+    # get page footer
+    $Output .= $LayoutObject->Footer();
+
+    # return page
+    return $Output;
 }
 
 1;
