@@ -1,13 +1,14 @@
 <?xml version="1.0" encoding="utf-8" ?>
 <otrs_package version="1.0">
     <Name>OTRSClosedTickets</Name>
-    <Version>6.0.1</Version>
+    <Version>6.0.2</Version>
     <Framework>6.0.x</Framework>
     <Vendor>lleszczynski</Vendor>
     <URL>https://github.com/lleszczynski</URL>
     <License>GNU GENERAL PUBLIC LICENSE Version 3, 29 June 2007</License>
     <ChangeLog Version="6.0.1" Date="2019-02-13 11:54:51">First release.</ChangeLog>
-    <Description Lang="en">Additional view for user spacific recently closed tickets.</Description>
+    <ChangeLog Version="6.0.2" Date="2019-02-23 12:42:12">Changes based on AgentTicketStatusView.</ChangeLog>
+    <Description Lang="en">Additional view for user specific recently closed tickets.</Description>
     <Description Lang="pl">Dodatkowy widok dla ostatnio zamkniętych zgłoszeń użytkownika.</Description>
     <IntroInstall Type="post" Lang="en" Title="Thank you!">Thank you for choosing the OTRSClosedTickets module. Hope it helps improve your experience with OTRS.</IntroInstall>
     <IntroInstall Type="post" Lang="pl" Title="Dziękuję!">Dziękuję za wybranie modułu OTRSClosedTickets. Mam nadzieję, że to przyczyni się do poprawy wrażeń z użytkowania systemu OTRS.</IntroInstall>
@@ -17,6 +18,7 @@
         <File Permission="644" Location="Kernel/Language/pl_OTRSClosedTickets.pm"></File>
         <File Permission="644" Location="Kernel/Config/Files/XML/OTRSClosedTickets.xml"></File>
         <File Permission="644" Location="Kernel/Modules/AgentTicketClosedTickets.pm"></File>
-        <File Permission="644" Location="Kernel/Output/HTML/Templates/Standard/AgentTicketClosedTickets.tt"></File>
+        <File Permission="644" Location="Custom/Kernel/Output/HTML/TicketOverview/Small.pm"></File>
+        <File Permission="644" Location="var/httpd/htdocs/skins/Agent/default/css/Core.AgentTicketClosedTickets.css"></File>
     </Filelist>
 </otrs_package>
